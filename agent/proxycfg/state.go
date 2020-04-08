@@ -632,63 +632,8 @@ func (s *state) handleUpdateConnectProxy(u cache.UpdateEvent, snap *ConfigSnapsh
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
 		snap.Roots = roots
-
-	case u.CorrelationID == leafWatchID:
-		leaf, ok := u.Result.(*structs.IssuedCert)
-		if !ok {
-			return fmt.Errorf("invalid type for response: %T", u.Result)
-		}
-		snap.ConnectProxy.Leaf = leaf
-
 	case u.CorrelationID == intentionsWatchID:
 		// Not in snapshot currently, no op
-
-	case strings.HasPrefix(u.CorrelationID, "discovery-chain:"):
-		resp, ok := u.Result.(*structs.DiscoveryChainResponse)
-		if !ok {
-			return fmt.Errorf("invalid type for response: %T", u.Result)
-		}
-		svc := strings.TrimPrefix(u.CorrelationID, "discovery-chain:")
-		snap.ConnectProxy.DiscoveryChain[svc] = resp.Chain
-
-		if err := s.resetWatchesFromChain(svc, resp.Chain, &snap.ConnectProxy.ConfigSnapshotUpstreams); err != nil {
-			return err
-		}
-
-	case strings.HasPrefix(u.CorrelationID, "upstream-target:"):
-		resp, ok := u.Result.(*structs.IndexedCheckServiceNodes)
-		if !ok {
-			return fmt.Errorf("invalid type for response: %T", u.Result)
-		}
-		correlationID := strings.TrimPrefix(u.CorrelationID, "upstream-target:")
-		targetID, svc, ok := removeColonPrefix(correlationID)
-		if !ok {
-			return fmt.Errorf("invalid correlation id %q", u.CorrelationID)
-		}
-
-		m, ok := snap.ConnectProxy.WatchedUpstreamEndpoints[svc]
-		if !ok {
-			m = make(map[string]structs.CheckServiceNodes)
-			snap.ConnectProxy.WatchedUpstreamEndpoints[svc] = m
-		}
-		snap.ConnectProxy.WatchedUpstreamEndpoints[svc][targetID] = resp.Nodes
-
-	case strings.HasPrefix(u.CorrelationID, "mesh-gateway:"):
-		resp, ok := u.Result.(*structs.IndexedCheckServiceNodes)
-		if !ok {
-			return fmt.Errorf("invalid type for response: %T", u.Result)
-		}
-		correlationID := strings.TrimPrefix(u.CorrelationID, "mesh-gateway:")
-		dc, svc, ok := removeColonPrefix(correlationID)
-		if !ok {
-			return fmt.Errorf("invalid correlation id %q", u.CorrelationID)
-		}
-		m, ok := snap.ConnectProxy.WatchedGatewayEndpoints[svc]
-		if !ok {
-			m = make(map[string]structs.CheckServiceNodes)
-			snap.ConnectProxy.WatchedGatewayEndpoints[svc] = m
-		}
-		snap.ConnectProxy.WatchedGatewayEndpoints[svc][dc] = resp.Nodes
 
 	case strings.HasPrefix(u.CorrelationID, "upstream:"+preparedQueryIDPrefix):
 		resp, ok := u.Result.(*structs.PreparedQueryExecuteResponse)
@@ -705,7 +650,71 @@ func (s *state) handleUpdateConnectProxy(u cache.UpdateEvent, snap *ConfigSnapsh
 		}
 		svcID := structs.ServiceIDFromString(strings.TrimPrefix(u.CorrelationID, svcChecksWatchIDPrefix))
 		snap.ConnectProxy.WatchedServiceChecks[svcID] = resp
+	default:
+		return s.handleUpdateUpstreams(u, &snap.ConnectProxy.ConfigSnapshotUpstreams)
+	}
+	return nil
+}
 
+func (s *state) handleUpdateUpstreams(u cache.UpdateEvent, snap *ConfigSnapshotUpstreams) error {
+	if u.Err != nil {
+		return fmt.Errorf("error filling agent cache: %v", u.Err)
+	}
+
+	switch {
+	case u.CorrelationID == leafWatchID:
+		leaf, ok := u.Result.(*structs.IssuedCert)
+		if !ok {
+			return fmt.Errorf("invalid type for response: %T", u.Result)
+		}
+		snap.Leaf = leaf
+
+	case strings.HasPrefix(u.CorrelationID, "discovery-chain:"):
+		resp, ok := u.Result.(*structs.DiscoveryChainResponse)
+		if !ok {
+			return fmt.Errorf("invalid type for response: %T", u.Result)
+		}
+		svc := strings.TrimPrefix(u.CorrelationID, "discovery-chain:")
+		snap.DiscoveryChain[svc] = resp.Chain
+
+		if err := s.resetWatchesFromChain(svc, resp.Chain, snap); err != nil {
+			return err
+		}
+
+	case strings.HasPrefix(u.CorrelationID, "upstream-target:"):
+		resp, ok := u.Result.(*structs.IndexedCheckServiceNodes)
+		if !ok {
+			return fmt.Errorf("invalid type for response: %T", u.Result)
+		}
+		correlationID := strings.TrimPrefix(u.CorrelationID, "upstream-target:")
+		targetID, svc, ok := removeColonPrefix(correlationID)
+		if !ok {
+			return fmt.Errorf("invalid correlation id %q", u.CorrelationID)
+		}
+
+		m, ok := snap.WatchedUpstreamEndpoints[svc]
+		if !ok {
+			m = make(map[string]structs.CheckServiceNodes)
+			snap.WatchedUpstreamEndpoints[svc] = m
+		}
+		snap.WatchedUpstreamEndpoints[svc][targetID] = resp.Nodes
+
+	case strings.HasPrefix(u.CorrelationID, "mesh-gateway:"):
+		resp, ok := u.Result.(*structs.IndexedCheckServiceNodes)
+		if !ok {
+			return fmt.Errorf("invalid type for response: %T", u.Result)
+		}
+		correlationID := strings.TrimPrefix(u.CorrelationID, "mesh-gateway:")
+		dc, svc, ok := removeColonPrefix(correlationID)
+		if !ok {
+			return fmt.Errorf("invalid correlation id %q", u.CorrelationID)
+		}
+		m, ok := snap.WatchedGatewayEndpoints[svc]
+		if !ok {
+			m = make(map[string]structs.CheckServiceNodes)
+			snap.WatchedGatewayEndpoints[svc] = m
+		}
+		snap.WatchedGatewayEndpoints[svc][dc] = resp.Nodes
 	default:
 		return fmt.Errorf("unknown correlation ID: %s", u.CorrelationID)
 	}
@@ -1029,12 +1038,6 @@ func (s *state) handleUpdateIngressGateway(u cache.UpdateEvent, snap *ConfigSnap
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
 		snap.Roots = roots
-	case u.CorrelationID == leafWatchID:
-		leaf, ok := u.Result.(*structs.IssuedCert)
-		if !ok {
-			return fmt.Errorf("invalid type for response: %T", u.Result)
-		}
-		snap.IngressGateway.Leaf = leaf
 	case u.CorrelationID == gatewayUpstreamsWatchID:
 		upstreams, ok := u.Result.(*structs.IndexedUpstreams)
 		if !ok {
@@ -1062,41 +1065,8 @@ func (s *state) handleUpdateIngressGateway(u cache.UpdateEvent, snap *ConfigSnap
 				delete(snap.IngressGateway.WatchedDiscoveryChains, id)
 			}
 		}
-
-	case strings.HasPrefix(u.CorrelationID, "discovery-chain:"):
-		resp, ok := u.Result.(*structs.DiscoveryChainResponse)
-		if !ok {
-			return fmt.Errorf("invalid type for response: %T", u.Result)
-		}
-		svc := strings.TrimPrefix(u.CorrelationID, "discovery-chain:")
-		snap.IngressGateway.DiscoveryChain[svc] = resp.Chain
-
-		if err := s.resetWatchesFromChain(svc, resp.Chain, &snap.IngressGateway.ConfigSnapshotUpstreams); err != nil {
-			return err
-		}
-
-	case strings.HasPrefix(u.CorrelationID, "upstream-target:"):
-		resp, ok := u.Result.(*structs.IndexedCheckServiceNodes)
-		if !ok {
-			return fmt.Errorf("invalid type for response: %T", u.Result)
-		}
-		correlationID := strings.TrimPrefix(u.CorrelationID, "upstream-target:")
-		targetID, svc, ok := removeColonPrefix(correlationID)
-		if !ok {
-			return fmt.Errorf("invalid correlation id %q", u.CorrelationID)
-		}
-
-		_, ok = snap.IngressGateway.WatchedUpstreamEndpoints[svc]
-		if !ok {
-			m := make(map[string]structs.CheckServiceNodes)
-			snap.IngressGateway.WatchedUpstreamEndpoints[svc] = m
-		}
-		snap.IngressGateway.WatchedUpstreamEndpoints[svc][targetID] = resp.Nodes
-
-	case strings.HasPrefix(u.CorrelationID, "mesh-gateway:"):
-		// TODO(gateways): Handle mesh-gateway functionality
 	default:
-		s.logger.Warn("received unknown update event", "event", u)
+		return s.handleUpdateUpstreams(u, &snap.IngressGateway.ConfigSnapshotUpstreams)
 	}
 
 	return nil
